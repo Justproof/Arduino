@@ -2,11 +2,14 @@
 #include <time.h>
 #include <esp_sntp.h>
 
-// === Fill these in ===
-static const char* WIFI_SSID = "tooth-decay";
-static const char* WIFI_PASS = "betterbrush2026";
+// WIFI_SSID / WIFI_PASS live in secrets.h, which is gitignored.
+#if __has_include("secrets.h")
+  #include "secrets.h"
+#else
+  #error "Copy secrets.example.h to secrets.h and fill in your WiFi credentials."
+#endif
+
 static const char* TZ_STRING = "CST6CDT,M3.2.0,M11.1.0";  // US Central
-// ======================
 
 static volatile bool ntp_synced = false;
 static void on_ntp_sync(struct timeval*) { ntp_synced = true; }

@@ -35,7 +35,6 @@ static void url_encode_into(String& out, const String& s) {
 static String http_get_text(const String& url) {
   WiFiClientSecure client;
   client.setInsecure();
-  client.setBufferSizes(2048, 512);   // shrink mbedTLS record buffers
   HTTPClient http;
   http.setTimeout(10000);
   http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
@@ -53,7 +52,6 @@ static size_t http_get_binary(const String& url, uint8_t** out_buf) {
   *out_buf = nullptr;
   WiFiClientSecure client;
   client.setInsecure();
-  client.setBufferSizes(2048, 512);
   HTTPClient http;
   http.setTimeout(15000);
   http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);

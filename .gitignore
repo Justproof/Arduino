@@ -1,2 +1,5 @@
 .DS_Store
 *.zip
+
+# Real WiFi credentials. Templates (secrets.example.h) stay tracked.
+secrets.h

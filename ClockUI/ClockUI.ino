@@ -7,11 +7,14 @@
 #include "ClockApp.h"
 #include "BLE_Clock.h"
 
-// === Fill these in ===
-static const char* WIFI_SSID = "tooth-decay";
-static const char* WIFI_PASS = "betterbrush2026";
+// WIFI_SSID / WIFI_PASS live in secrets.h, which is gitignored.
+#if __has_include("secrets.h")
+  #include "secrets.h"
+#else
+  #error "Copy secrets.example.h to secrets.h and fill in your WiFi credentials."
+#endif
+
 static const char* TZ_STRING = "CST6CDT,M3.2.0,M11.1.0";  // US Central
-// ======================
 
 void Driver_Loop(void *parameter) {
   uint32_t last_ble = 0;

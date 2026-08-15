@@ -7,8 +7,8 @@
 #include "ClockApp.h"
 
 // === Fill these in ===
-static const char* WIFI_SSID = "tooth-decay";
-static const char* WIFI_PASS = "betterbrush2026";
+static const char* WIFI_SSID = "your-network-name";
+static const char* WIFI_PASS = "your-network-password";
 static const char* TZ_STRING = "CST6CDT,M3.2.0,M11.1.0";  // US Central
 // ======================
 
