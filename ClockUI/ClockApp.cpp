@@ -198,25 +198,93 @@ static void build_analog(lv_obj_t* page) {
   hand_s = lv_meter_add_needle_line(meter, scale, 3,  lv_palette_main(LV_PALETTE_RED), 0);
 }
 
+/**
+ * Owns the network for the life of the sketch: keeps the station associated
+ * and (re)starts SNTP on every fresh link-up. Never returns — an earlier
+ * version gave up after 30s and deleted itself, which left SNTP unstarted
+ * whenever association ran long, so the UI sat on "syncing NTP..." forever
+ * while WiFi.status() reported a healthy link.
+ */
 static void wifi_task(void* arg) {
   const char** creds = (const char**)arg;
   const char* ssid = creds[0];
   const char* pass = creds[1];
+  const char* tz   = creds[2];
 
   WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.setAutoReconnect(true);
+  WiFi.setTxPower(WIFI_POWER_19_5dBm);  // this board sits at the edge of range
+
+  /* A marginal link produces a disconnect every second or so; collapse the
+     repeats and report only when the reason changes or every 30s. */
+  WiFi.onEvent([](arduino_event_id_t, arduino_event_info_t info) {
+    static uint8_t  last_reason = 0;
+    static uint32_t last_print  = 0;
+    static uint32_t repeats     = 0;
+    uint8_t reason = info.wifi_sta_disconnected.reason;
+    repeats++;
+    if (reason != last_reason || millis() - last_print > 30000) {
+      Serial.printf("[NET] disconnect reason=%u (x%u)\n", reason, repeats);
+      last_reason = reason;
+      last_print  = millis();
+      repeats     = 0;
+    }
+  }, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+
+  int n = WiFi.scanNetworks();
+  Serial.printf("[NET] scan found %d networks\n", n);
+  for (int i = 0; i < n; i++) {
+    if (WiFi.SSID(i) == ssid) {
+      Serial.printf("[NET] target '%s' rssi=%d ch=%d enc=%d\n",
+                    WiFi.SSID(i).c_str(), WiFi.RSSI(i),
+                    WiFi.channel(i), (int)WiFi.encryptionType(i));
+    }
+  }
+
   WiFi.begin(ssid, pass);
+  Serial.printf("[NET] associating with '%s'\n", ssid);
 
-  uint32_t t0 = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 30000) {
-    vTaskDelay(pdMS_TO_TICKS(500));
+  bool sntp_running = false;
+  uint32_t last_attempt = millis();
+  uint32_t last_report  = 0;
+
+  for (;;) {
+    if (WiFi.status() == WL_CONNECTED) {
+      if (!sntp_running) {
+        Serial.printf("[NET] up: ip=%s gw=%s dns=%s rssi=%d\n",
+                      WiFi.localIP().toString().c_str(),
+                      WiFi.gatewayIP().toString().c_str(),
+                      WiFi.dnsIP().toString().c_str(),
+                      WiFi.RSSI());
+        sntp_set_time_sync_notification_cb(on_ntp_sync);
+        sntp_set_sync_mode(SNTP_SYNC_MODE_IMMED);
+        /* configTzTime, not configTime: configTime(0,0,...) rewrites TZ to
+           UTC and would undo the zone clock_app_init installed. */
+        configTzTime(tz, "pool.ntp.org", "time.nist.gov", "time.google.com");
+        Serial.println("[NTP] sntp started");
+        sntp_running = true;
+        last_report = millis();
+      } else if (!ntp_synced && millis() - last_report > 10000) {
+        Serial.printf("[NTP] still unsynced after %us (sntp reachability=0x%02x)\n",
+                      (unsigned)((millis() - last_attempt) / 1000),
+                      sntp_getreachability(0));
+        last_report = millis();
+      }
+    } else {
+      if (sntp_running) {
+        Serial.printf("[NET] link lost (status=%d)\n", WiFi.status());
+        sntp_running = false;
+      }
+      if (millis() - last_attempt > 20000) {
+        Serial.printf("[NET] retrying association (status=%d)\n", WiFi.status());
+        WiFi.disconnect();
+        WiFi.begin(ssid, pass);
+        last_attempt = millis();
+      }
+    }
+    vTaskDelay(pdMS_TO_TICKS(1000));
   }
-
-  if (WiFi.status() == WL_CONNECTED) {
-    sntp_set_time_sync_notification_cb(on_ntp_sync);
-    configTime(0, 0, "pool.ntp.org", "time.nist.gov");
-  }
-
-  vTaskDelete(NULL);
 }
 
 void clock_app_init(const char* ssid, const char* pass, const char* tz) {
@@ -237,9 +305,10 @@ void clock_app_init(const char* ssid, const char* pass, const char* tz) {
   setenv("TZ", tz, 1);
   tzset();
 
-  static const char* creds[2];
+  static const char* creds[3];
   creds[0] = ssid;
   creds[1] = pass;
+  creds[2] = tz;
   xTaskCreatePinnedToCore(wifi_task, "wifi_task", 4096, (void*)creds, 1, NULL, 0);
 }
 
