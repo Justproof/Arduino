@@ -12,7 +12,7 @@ Everything here targets the **Waveshare ESP32-S3-Touch-LCD-2.8C**, the round 480
 | `ClockSmokeTest/` | Sixty lines that answer "is it the WiFi or is it my code?" |
 | `I2CScan/` | Sweeps a few candidate pin pairs looking for signs of life on the bus |
 | `WaveshareDemo/` | The vendor demo bundle, kept for reference |
-| `libraries/` | Vendored LVGL 8.3.10 and ESP32-audioI2S 2.0.0 |
+| `libraries/` | Vendored LVGL 8.3.10, plus ESP32-audioI2S 2.0.0 that nothing uses any more |
 
 ## The board
 
@@ -24,9 +24,18 @@ Everything here targets the **Waveshare ESP32-S3-Touch-LCD-2.8C**, the round 480
 | RTC | PCF85063 (I2C, 0x51) |
 | I/O expander | TCA9554PWR (I2C, 0x20), gates the peripheral reset lines |
 | IMU | QMI8658 |
+| Noise | A buzzer, on expander line `Extend_IO8`. That is the whole audio department |
 | I2C pins | SDA=15, SCL=7, one bus shared by touch, RTC, expander, and IMU |
 
 Toolchain: `esp32:esp32` core **3.3.8**, arduino-cli, LVGL 8.3.10.
+
+### There is no speaker
+
+Worth knowing before you plan a feature around it. The 2.8C has a buzzer and nothing else that moves air. The [board schematic](https://files.waveshare.com/wiki/ESP32-S3-Touch-LCD-2.8C/ESP32-S3-Touch-LCD-2.8C_schematic_diagram.pdf) lists five ICs, `CH343P`, `ETA6098`, `PCF85063ATL`, `QMI8658C`, and `TCA9554PWR`, and the words speaker, audio, and jack appear on it exactly zero times. No DAC, no amplifier, no I2S nets.
+
+The confusion is understandable and entirely the internet's fault. Waveshare's product copy for the 2.8 family gets cheerfully mixed together, and several pages will tell you this board ships an 8Ω 2W speaker and a PCM5101. That is a different board. Check the schematic, not the listing.
+
+The plain 2.8 **is** the variant with the PCM5101 DAC, which is why its demo carries `Audio_PCM5101.*` and a music player UI. Those files rode into this sketch on the wrong-board demo and were removed once the schematic settled the question. If you want the clock itself to chirp, the buzzer through the TCA9554 is the onboard option, and anything nicer means an external I2S DAC on the header.
 
 **The plain 2.8 demo does not work on this board.** It expects a 240x320 ST7789 over SPI and a CST328 touch controller on different pins. If every `Wire` transaction NAKs at every address, you are running the wrong demo, not debugging a dead board.
 
@@ -95,7 +104,7 @@ arduino-cli compile --fqbn "$FQBN"
 arduino-cli upload -p "$PORT" --fqbn "$FQBN"
 ```
 
-A healthy build lands around 53% of program storage and 31% of dynamic memory. If dynamic memory climbs much past that, read the radio section below before you do anything else.
+A healthy build lands around 49% of program storage and 31% of dynamic memory. If dynamic memory climbs much past that, read the radio section below before you do anything else.
 
 ### Do not leave duplicate files in a sketch folder
 
@@ -201,9 +210,20 @@ Also worth knowing: at the 802.11 layer, `reason=2` and `reason=201` happen *bef
 - Everything else is copied verbatim from the 2.8C demo's `Arduino/examples/LVGL_Arduino/`
 - `_unused_2.8_demo/`, the wrong-board drivers, kept as a cautionary tale
 
-`AlbumArt.h/.cpp` are still tracked and still compiled, though nothing calls them. See [ALBUM_ART_ATTEMPT.md](ClockUI/ALBUM_ART_ATTEMPT.md) for the full story: the short version is that a TLS handshake wants roughly 30KB and there were 22 to 25KB going spare, and mbedTLS's 16KB record buffers are baked into the precompiled SDK.
+### Deleted, and why
 
-One trap if you touch that file: it used to call `WiFiClientSecure::setBufferSizes()` to shrink those buffers, and core 3.3.8 renamed the class to `NetworkClientSecure` and dropped the method with no replacement. The calls had to go, which means the TLS path now has nothing standing between it and heap exhaustion.
+Eight files left the sketch root once the schematic confirmed there is no audio hardware here:
+
+- `Audio_PCM5101.h/.cpp` drove an I2S DAC this board does not have. The header was byte-identical to the plain-2.8 demo's copy, pins and all.
+- `LVGL_Music.h/.cpp` was the demo's music-player UI, which fed that DAC.
+- `LVGL_Example.h/.cpp` was the demo's tour screen, and the only thing that included `LVGL_Music.h`.
+- `AlbumArt.h/.cpp` was the artwork fetcher, unreferenced since the attempt was abandoned.
+
+Nothing outside that cluster referenced any of it, which is exactly why it survived so long. It was never linked, but arduino-cli compiles every file in the sketch root, so it was costing flash for hardware that isn't on the board. Removing it took the build from 53% to 49%, about 138KB.
+
+The vendored `libraries/ESP32-audioI2S-master` is now unused too. It is left in place because `libraries/` is sketchbook-wide and another sketch may want it.
+
+Album art is still worth reading about even though the code is gone. See [ALBUM_ART_ATTEMPT.md](ClockUI/ALBUM_ART_ATTEMPT.md): the short version is that a TLS handshake wants roughly 30KB and there were 22 to 25KB going spare, and mbedTLS's 16KB record buffers are baked into the precompiled SDK. If you resurrect it from git history, know that it called `WiFiClientSecure::setBufferSizes()` to shrink those buffers, and core 3.3.8 renamed the class to `NetworkClientSecure` and dropped the method with no replacement.
 
 ## Bring-up order matters
 
@@ -229,5 +249,7 @@ Next, if you want it: move BLE to NimBLE so WiFi can stay up, which brings album
 ```
 https://files.waveshare.com/wiki/ESP32-S3-Touch-LCD-2.8C/ESP32-S3-Touch-LCD-2.8C-Demo.zip
 ```
+
+Check what you actually have before trusting it. The `demo.zip` sitting there now is the **plain 2.8** bundle, not the 2.8C: it ships `Display_ST7789.cpp` and `Touch_CST328.cpp`, which is how the wrong-board drivers got into this project in the first place. The 2.8C bundle is the one with `Display_ST7701` and `Touch_GT911`.
 
 Note that the CDN path spells it `2.8C` while the wiki URL spells it `2.8-C`. Also, `www.waveshare.com` and `docs.waveshare.com` serve scripted clients something other than the real page, so pull the zip and read its source rather than trusting a fetched doc.

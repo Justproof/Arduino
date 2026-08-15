@@ -50,12 +50,26 @@ static String s_title;
 static String s_artist;
 static String s_album;
 static bool s_playing = false;
+static float s_rate = 0.0f;
+static float s_elapsed = 0.0f;
+static uint32_t s_elapsed_ms = 0;   // millis() when s_elapsed was reported
+static float s_duration = 0.0f;
+static float s_volume = -1.0f;
 
 const String& BLE_AMS_GetTitle()  { return s_title; }
 const String& BLE_AMS_GetArtist() { return s_artist; }
 const String& BLE_AMS_GetAlbum()  { return s_album; }
 bool BLE_AMS_IsPlaying()          { return s_playing; }
 bool BLE_AMS_IsConnected()        { return ams.ready; }
+float BLE_AMS_GetPlaybackRate()   { return s_playing ? s_rate : 0.0f; }
+float BLE_AMS_GetDurationSec()    { return s_duration; }
+float BLE_AMS_GetVolume()         { return s_volume; }
+
+float BLE_AMS_GetElapsedSec() {
+  if (!s_playing) return s_elapsed;
+  float rate = (s_rate > 0.0f) ? s_rate : 1.0f;
+  return s_elapsed + (millis() - s_elapsed_ms) / 1000.0f * rate;
+}
 
 static int gap_event_cb(struct ble_gap_event* event, void* arg);
 
@@ -71,17 +85,18 @@ static void subscribe_and_register_interests() {
     cccd_enable, sizeof(cccd_enable), nullptr, nullptr);
   Serial.printf("[AMS] subscribe CCCD@%u rc=0x%04x\n", ams.hdl_entity_update_cccd, rc);
 
-  // 2. Register interest in Track attributes (artist, album, title).
+  // 2. Register interest in Track attributes (artist, album, title, duration).
   const uint8_t track_attrs[] = {
-    ENTITY_TRACK, TRACK_ARTIST, TRACK_ALBUM, TRACK_TITLE
+    ENTITY_TRACK, TRACK_ARTIST, TRACK_ALBUM, TRACK_TITLE, TRACK_DURATION
   };
   rc = write_interest(ams.conn_handle, ams.hdl_entity_update,
     track_attrs, sizeof(track_attrs));
   Serial.printf("[AMS] register track interests rc=0x%04x\n", rc);
 
-  // 3. Register interest in Player.PlaybackInfo (so we know play vs pause).
+  // 3. Register interest in Player.PlaybackInfo (play state, rate, elapsed)
+  //    and Player.Volume (drives the scope trace amplitude).
   const uint8_t player_attrs[] = {
-    ENTITY_PLAYER, PLAYER_PLAYBACK_INFO
+    ENTITY_PLAYER, PLAYER_PLAYBACK_INFO, PLAYER_VOLUME
   };
   rc = write_interest(ams.conn_handle, ams.hdl_entity_update,
     player_attrs, sizeof(player_attrs));
@@ -192,16 +207,28 @@ static void parse_entity_update(const struct os_mbuf* om) {
   String value   = (len > 3) ? all.substring(3) : String();
 
   if (entity == ENTITY_TRACK) {
-    if      (attr == TRACK_TITLE)  s_title  = value;
-    else if (attr == TRACK_ARTIST) s_artist = value;
-    else if (attr == TRACK_ALBUM)  s_album  = value;
+    if      (attr == TRACK_TITLE)    s_title    = value;
+    else if (attr == TRACK_ARTIST)   s_artist   = value;
+    else if (attr == TRACK_ALBUM)    s_album    = value;
+    else if (attr == TRACK_DURATION) s_duration = value.toFloat();
     Serial.printf("[AMS] Track.%u = '%s'\n", attr, value.c_str());
   } else if (entity == ENTITY_PLAYER && attr == PLAYER_PLAYBACK_INFO) {
-    int comma = value.indexOf(',');
-    if (comma > 0) {
-      s_playing = (value.substring(0, comma) == "1");
+    // "PlaybackState,PlaybackRate,ElapsedTime", e.g. "1,1.000,15.229"
+    int c1 = value.indexOf(',');
+    int c2 = (c1 >= 0) ? value.indexOf(',', c1 + 1) : -1;
+    if (c1 > 0) {
+      s_playing = (value.substring(0, c1) == "1");
+      if (c2 > c1) {
+        s_rate    = value.substring(c1 + 1, c2).toFloat();
+        s_elapsed = value.substring(c2 + 1).toFloat();
+      }
+      s_elapsed_ms = millis();
     }
-    Serial.printf("[AMS] PlaybackInfo = '%s' (playing=%d)\n", value.c_str(), s_playing);
+    Serial.printf("[AMS] PlaybackInfo = '%s' (playing=%d rate=%.2f elapsed=%.1f)\n",
+      value.c_str(), s_playing, s_rate, s_elapsed);
+  } else if (entity == ENTITY_PLAYER && attr == PLAYER_VOLUME) {
+    s_volume = value.toFloat();
+    Serial.printf("[AMS] Volume = %.2f\n", s_volume);
   }
 }
 
@@ -228,6 +255,10 @@ void BLE_AMS_OnDisconnect() {
   s_artist = "";
   s_album = "";
   s_playing = false;
+  s_rate = 0.0f;
+  s_elapsed = 0.0f;
+  s_duration = 0.0f;
+  s_volume = -1.0f;
   if (listener_registered) {
     ble_gap_event_listener_unregister(&notify_listener);
     listener_registered = false;

@@ -14,7 +14,12 @@ LVGL clock (digital + analog tabs, NTP-backed, RTC fallback) running on a Wavesh
 | IMU | QMI8658 |
 | USB bridge | **CH343** (vendor 0x1A86 / product 0x55D3) — UART0, not native USB |
 | I²C pins | **SDA=15, SCL=7** (single bus shared with touch + RTC + expander + IMU) |
-| Port | `/dev/cu.usbmodem5AB01629621` |
+| Port (CH343 cable) | `/dev/cu.usbmodem5AB01629621` |
+| Port (native USB cable) | `/dev/cu.usbmodem101` — enumerates as Espressif "USB JTAG_serial debug unit" (0x303A/0x1001) |
+
+The board can enumerate two different ways depending on which cable/connector is
+used. Identify which you have with `ioreg -p IOUSB` before trusting any serial
+assumptions below.
 
 The plain 2.8 demo (240×320 ST7789 SPI + CST328) **does not work** on this board. Display driver, touch driver, and I²C pins all differ. If `Wire` transactions fail at every address, you have the wrong demo.
 
@@ -24,7 +29,11 @@ The plain 2.8 demo (240×320 ST7789 SPI + CST328) **does not work** on this boar
 FQBN: esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi,PartitionScheme=app3M_fat9M_16MB,CDCOnBoot=default
 ```
 
-`CDCOnBoot=default` is required (not `cdc`). The CH343 bridges UART0 to USB; native CDC isn't wired. Setting `cdc` redirects `Serial` to native USB CDC → host sees the port but reads nothing.
+`CDCOnBoot` must match the cable in use:
+- **CH343 cable** (`usbmodem5AB...`): use `CDCOnBoot=default`. `Serial` goes to UART0 → CH343. Setting `cdc` means the host reads nothing.
+- **Native USB cable** (`usbmodem101`): use `CDCOnBoot=cdc` to see `Serial` output. With `default`, only `printf()` (IDF console secondary output) reaches this port — the Waveshare drivers print, but all our `[NET]/[BLE]/[AMS]` `Serial.printf` logs are invisible.
+
+**The device is currently flashed with `CDCOnBoot=cdc`** (native-USB debugging session, 2026-08-15). Rebuild with `default` before going back to the CH343 cable.
 
 Compile + flash:
 ```bash
@@ -38,6 +47,12 @@ arduino-cli upload  -p /dev/cu.usbmodem5AB01629621 --fqbn "esp32:esp32:esp32s3:F
 `cat /dev/cu.*`, `screen`, and `arduino-cli monitor` all toggle DTR/RTS on open. On the CH343 auto-reset circuit, that holds the ESP32-S3 in download mode → you see only boot-ROM garbage at the wrong baud rate. Symptom: bytes that look like `ea df da fb` repeating.
 
 Use `/tmp/read_serial.py [seconds]`. It opens with `CLOCAL` set and explicitly deasserts DTR/RTS via `TIOCMSET` so the chip stays in run mode.
+
+On the **native USB port**, opening the serial port sometimes hard-resets the
+board (and sometimes doesn't — it depends on prior DTR/RTS state). Don't treat
+a silent capture as a dead board: a healthy steady-state app prints nothing
+unless events fire. The reliable liveness check is a BLE scan from the Mac
+(`bleak` in a venv): if `ClockUI` is advertising, the app is up.
 
 ## Bring-up sequence (2.8C — order matters)
 
@@ -73,9 +88,67 @@ TZ: `CST6CDT,M3.2.0,M11.1.0` (US Central, DST starts 2nd Sun of March, ends 1st 
 ## Files
 
 - `ClockUI.ino` — top-level, drives bring-up sequence, includes credentials
-- `ClockApp.h/.cpp` — our module: WiFi task + NTP callback + LVGL tabview UI (digital + analog meter)
+- `ClockApp.h/.cpp` — our module: WiFi task + NTP callback + LVGL tabview UI (digital + analog meter + Signal music tab)
 - Everything else copied verbatim from the 2.8C demo's `Arduino/examples/LVGL_Arduino/`
 
-## Open status (as of last session)
+## Music tab: "Signal" oscilloscope
 
-Compile passes, flash succeeds. After adding staged `Serial.println` debug prints to setup(), capture was not yet re-run to verify the display actually renders. Resume by reflashing the current `.ino` and running `/tmp/read_serial.py 25` to see which init step (if any) hangs.
+The music tab renders a synthesized oscilloscope trace regulated by real AMS
+data (the board never sees audio: iPhone plays it, no mic, PCM5101 unused).
+Play/pause ramps amplitude (pause = flatline), PlaybackInfo rate drives scroll
+speed, iPhone volume scales amplitude, title+artist hash seeds the waveform
+shape per track, track changes kick a decaying surge. `wave_cb` runs a 33 ms
+lv_timer updating a 121-point `lv_line` in a 480x150 band; only that band
+invalidates. BLE_AMS additionally subscribes to Track.Duration and
+Player.Volume, and parses rate + elapsed out of PlaybackInfo (elapsed is
+extrapolated between notifications in `BLE_AMS_GetElapsedSec`).
+
+## Boot crash: never re-add the touch attachInterrupt
+
+`Touch_Init` used to call `attachInterrupt(GT911_INT_PIN, ...)`. With an
+**empty NVS** this deterministically crash-loops the board at boot:
+`Stack canary watchpoint triggered (ipc1)` — the 1KB ESP-IDF ipc1 task
+overflows inside `gpio_isr_register → esp_intr_alloc → heap_caps_malloc`.
+The interrupt was pure debug plumbing anyway (LVGL polls `Touch_Read_Data()`
+every tick; the ISR flag only gated a printf in `Touch_Loop`). Removed
+2026-08-15. Touch works fine without it.
+
+Related hard-won lessons:
+- **Do not erase NVS casually** (`esptool erase_region 0x9000 0x5000`). It
+  exposed the crash above and cost a recovery session.
+- If the board ends up dark/unresponsive after partial flashing: do a **full
+  `arduino-cli upload`** (writes bootloader + partitions + boot_app0 + app).
+  An app-only `esptool write_flash 0x10000` from manual download mode once
+  left the board black even though the hash verified.
+- Manual download mode: hold BOOT, tap RESET, release BOOT. esptool then
+  connects even when a crash loop breaks the auto-reset handshake.
+
+## BLE pairing status (open as of 2026-08-15)
+
+The clock advertises correctly — verified over the air from the Mac with a
+`bleak` scan (name `ClockUI`, CTS + BAS in scan response, strong RSSI) and
+via CoreBluetooth's own decode. The advertisement now carries **Service
+Solicitation (AD 0x15) for ANCS** in the main packet and **AMS** in the scan
+response (`BLE_Clock.cpp`), because iOS Settings filters generic BLE
+peripherals out of "Other Devices".
+
+**Despite all that, modern iOS still does not list ClockUI in Settings >
+Bluetooth.** Neither plain CTS advertising, AMS solicitation, nor ANCS
+solicitation earned a row. iPhone-side bond is gone (user forgot it at some
+point) and clock-side bonds were wiped with the NVS.
+
+**Next step, untested:** pair via a BLE utility app on the iPhone (LightBlue
+or nRF Connect): connect to ClockUI from the app; the firmware's
+`setForceAuthentication(true)` sends a Security Request on connect, which
+pops the iOS system pairing dialog and creates a normal system-wide bond.
+After bonding, AMS discovery runs from `onAuthenticationComplete` and the
+music tab lights up. How the original pairing was ever created is unknown —
+possibly an older iOS listed the device, or this app path was used.
+
+## Signal music tab: session log 2026-08-15
+
+Built and flashed the "Signal" oscilloscope music tab (see section above),
+plus AMS additions: `Track.Duration` + `Player.Volume` subscriptions and
+full `PlaybackInfo` parsing (state, rate, elapsed with extrapolation).
+Display + touch verified working on hardware; the trace idles at NO SIGNAL
+until an iPhone bonds (blocked on pairing, above).

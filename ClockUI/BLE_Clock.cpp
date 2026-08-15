@@ -119,10 +119,29 @@ void BLE_Clock_Init(const char* device_name) {
 
   BLEAdvertisementData advData;
   advData.setFlags(0x06);  // LE General Discoverable + BR/EDR not supported
-  advData.setName(device_name);
-  advData.setCompleteServices(BLEUUID(UUID_SVC_CTS));
+  /* Service Solicitation (AD type 0x15). iOS Settings filters generic BLE
+     peripherals out of the "Other Devices" list; soliciting ANCS is what
+     reliably earns a row there (AMS solicitation alone gets ignored by
+     modern iOS). We solicit ANCS in the main advertisement purely for
+     visibility and AMS in the scan response for honesty about what we use.
+     ANCS 7905F431-B5CE-4E99-A40F-4B1E122D00D0, little-endian. */
+  static const uint8_t ancs_solicit[] = {
+    0x11, 0x15,
+    0xD0, 0x00, 0x2D, 0x12, 0x1E, 0x4B, 0x0F, 0xA4,
+    0x99, 0x4E, 0xCE, 0xB5, 0x31, 0xF4, 0x05, 0x79
+  };
+  advData.addData((char*)ancs_solicit, sizeof(ancs_solicit));
+  advData.setName(device_name);  // 3 + 18 + 9 = 30 of 31 adv bytes
 
   BLEAdvertisementData scanData;
+  /* AMS 89D3502B-0F36-433A-8EF4-C502AD55F8DC, little-endian. */
+  static const uint8_t ams_solicit[] = {
+    0x11, 0x15,
+    0xDC, 0xF8, 0x55, 0xAD, 0x02, 0xC5, 0xF4, 0x8E,
+    0x3A, 0x43, 0x36, 0x0F, 0x2B, 0x50, 0xD3, 0x89
+  };
+  scanData.addData((char*)ams_solicit, sizeof(ams_solicit));
+  scanData.setCompleteServices(BLEUUID(UUID_SVC_CTS));
   scanData.setCompleteServices(BLEUUID(UUID_SVC_BAS));
 
   BLEAdvertising* adv = BLEDevice::getAdvertising();

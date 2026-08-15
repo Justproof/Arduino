@@ -38,7 +38,11 @@ uint8_t Touch_Init(void) {
   GT911_Touch_Reset();
   GT911_Read_cfg();
 
-  attachInterrupt(GT911_INT_PIN, Touch_GT911_ISR, interrupt); 
+  /* No attachInterrupt here. LVGL polls Touch_Read_Data() every tick, so the
+     GT911 INT line is unused except to feed a debug printf via Touch_Loop.
+     Registering it overflows the 1KB ipc1 task stack during boot when NVS is
+     empty (gpio_isr_register -> esp_intr_alloc -> malloc under the stack
+     canary watchpoint), crash-looping the board. */
 
   return true;
 }
