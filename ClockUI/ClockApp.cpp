@@ -19,6 +19,7 @@ static lv_obj_t* lbl_np_album  = nullptr;
 static lv_obj_t* lbl_np_play   = nullptr;  // label inside play/pause btn
 
 static volatile bool ntp_synced = false;
+static volatile bool radio_free = false;  // WiFi is down; BLE may start
 
 static void on_ntp_sync(struct timeval*) {
   ntp_synced = true;
@@ -199,11 +200,18 @@ static void build_analog(lv_obj_t* page) {
 }
 
 /**
- * Owns the network for the life of the sketch: keeps the station associated
- * and (re)starts SNTP on every fresh link-up. Never returns — an earlier
- * version gave up after 30s and deleted itself, which left SNTP unstarted
- * whenever association ran long, so the UI sat on "syncing NTP..." forever
- * while WiFi.status() reported a healthy link.
+ * Brings the station up, sets the clock from SNTP, then shuts WiFi down and
+ * hands the radio and its heap to BLE.
+ *
+ * WiFi and Bluedroid cannot both live in what is left of internal RAM on this
+ * build: whichever starts second fails. WiFi second means createCharacteristic
+ * asserts on a NULL semaphore at ~73KB free; BLE second means esp_wifi_start
+ * never comes up and the station sits at WL_STOPPED. They also share the one
+ * 2.4GHz radio, so overlapping them starved the auth exchange into endless
+ * reason=2 deauths. Running them in sequence sidesteps both problems.
+ *
+ * The clock keeps time afterwards from the PCF85063, which on_ntp_sync writes
+ * on every successful sync.
  */
 static void wifi_task(void* arg) {
   const char** creds = (const char**)arg;
@@ -216,40 +224,31 @@ static void wifi_task(void* arg) {
   WiFi.setAutoReconnect(true);
   WiFi.setTxPower(WIFI_POWER_19_5dBm);  // this board sits at the edge of range
 
-  /* A marginal link produces a disconnect every second or so; collapse the
-     repeats and report only when the reason changes or every 30s. */
-  WiFi.onEvent([](arduino_event_id_t, arduino_event_info_t info) {
-    static uint8_t  last_reason = 0;
-    static uint32_t last_print  = 0;
-    static uint32_t repeats     = 0;
-    uint8_t reason = info.wifi_sta_disconnected.reason;
-    repeats++;
-    if (reason != last_reason || millis() - last_print > 30000) {
-      Serial.printf("[NET] disconnect reason=%u (x%u)\n", reason, repeats);
-      last_reason = reason;
-      last_print  = millis();
-      repeats     = 0;
-    }
-  }, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
-
-  int n = WiFi.scanNetworks();
-  Serial.printf("[NET] scan found %d networks\n", n);
-  for (int i = 0; i < n; i++) {
-    if (WiFi.SSID(i) == ssid) {
-      Serial.printf("[NET] target '%s' rssi=%d ch=%d enc=%d\n",
-                    WiFi.SSID(i).c_str(), WiFi.RSSI(i),
-                    WiFi.channel(i), (int)WiFi.encryptionType(i));
-    }
-  }
-
   WiFi.begin(ssid, pass);
   Serial.printf("[NET] associating with '%s'\n", ssid);
 
+  /* How long to chase a sync before giving the radio to BLE anyway, so the
+     music tab still works on a network that never appears. */
+  const uint32_t GIVE_UP_MS = 90000;
+
   bool sntp_running = false;
+  uint32_t t_start      = millis();
   uint32_t last_attempt = millis();
   uint32_t last_report  = 0;
 
   for (;;) {
+    if (ntp_synced || millis() - t_start > GIVE_UP_MS) {
+      Serial.printf("[NET] done (synced=%d); powering WiFi down, heap=%u\n",
+                    (int)ntp_synced, (unsigned)ESP.getFreeHeap());
+      WiFi.disconnect(true, false);
+      WiFi.mode(WIFI_OFF);
+      vTaskDelay(pdMS_TO_TICKS(300));
+      Serial.printf("[NET] wifi off, heap=%u -> BLE may start\n",
+                    (unsigned)ESP.getFreeHeap());
+      radio_free = true;
+      vTaskDelete(NULL);
+    }
+
     if (WiFi.status() == WL_CONNECTED) {
       if (!sntp_running) {
         Serial.printf("[NET] up: ip=%s gw=%s dns=%s rssi=%d\n",
@@ -283,6 +282,7 @@ static void wifi_task(void* arg) {
         last_attempt = millis();
       }
     }
+
     vTaskDelay(pdMS_TO_TICKS(1000));
   }
 }
@@ -310,6 +310,14 @@ void clock_app_init(const char* ssid, const char* pass, const char* tz) {
   creds[1] = pass;
   creds[2] = tz;
   xTaskCreatePinnedToCore(wifi_task, "wifi_task", 4096, (void*)creds, 1, NULL, 0);
+}
+
+bool clock_app_time_synced(void) {
+  return ntp_synced;
+}
+
+bool clock_app_radio_free(void) {
+  return radio_free;
 }
 
 void clock_app_create_ui(void) {

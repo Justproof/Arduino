@@ -16,12 +16,17 @@
 
 static const char* TZ_STRING = "CST6CDT,M3.2.0,M11.1.0";  // US Central
 
+/* Set once BLE_Clock_Init has returned. Notifying before that posts to a
+   queue the stack has not created yet, which trips an assert in
+   xQueueGenericSend and reboots the board. */
+static volatile bool ble_ready = false;
+
 void Driver_Loop(void *parameter) {
   uint32_t last_ble = 0;
   while (1) {
     RTC_Loop();
     BAT_Get_Volts();
-    if (millis() - last_ble > 1000) {
+    if (ble_ready && millis() - last_ble > 1000) {
       BLE_Clock_Notify();
       last_ble = millis();
     }
@@ -46,13 +51,25 @@ void setup() {
   Serial.println("[7] LCD_Init");        Serial.flush(); LCD_Init();
   Serial.println("[8] Lvgl_Init");       Serial.flush(); Lvgl_Init();
   Serial.println("[9] create_ui");       Serial.flush(); clock_app_create_ui();
+  /* WiFi runs first and alone; BLE starts from loop() once wifi_task has
+     powered the radio down. See the wifi_task comment in ClockApp.cpp for
+     why they cannot overlap on this build. */
   Serial.println("[10] clock_init");     Serial.flush(); clock_app_init(WIFI_SSID, WIFI_PASS, TZ_STRING);
-  Serial.println("[10.5] BLE_Clock");    Serial.flush(); BLE_Clock_Init("ClockUI");
   xTaskCreatePinnedToCore(Driver_Loop, "Driver_Loop", 4096, NULL, 3, NULL, 0);
   Serial.println("[11] setup() done");   Serial.flush();
 }
 
 void loop() {
+  static bool ble_started = false;
+  if (!ble_started && clock_app_radio_free()) {
+    Serial.printf("[BLE] starting (ntp_synced=%d)\n",
+                  (int)clock_app_time_synced());
+    Serial.flush();
+    BLE_Clock_Init("ClockUI");
+    ble_started = true;
+    ble_ready   = true;
+  }
+
   Lvgl_Loop();
   delay(5);
 }
